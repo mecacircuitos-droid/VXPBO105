@@ -20,23 +20,27 @@ REGIME_LABEL = {
     "HORIZ": "Horizontal Flight",
 }
 
+# Clock reference (12 o'clock = 0°, 3 o'clock = 90°, 6 o'clock = 180°, 9 o'clock = 270°)
 BLADE_CLOCK_DEG = {"YEL": 0.0, "RED": 90.0, "BLU": 180.0, "GRN": 270.0}
 
 # BO105 — RPM de referencia en el simulador
 BO105_DISPLAY_RPM = 424.0
 
+# Sensibilidades (training/AMM)
 PITCHLINK_MM_PER_TURN = 10.0
 TRIMTAB_MMTRACK_PER_MM = 15.0
+
+# --- NUEVO: escala por régimen según tu tabla polar (confirmado 0.5 IPS) ---
+# 0.5 IPS -> 200 g (GROUND) => 0.0025 IPS/g
+# 0.5 IPS -> 500 g (HOVER)  => 0.0010 IPS/g
 IPS_PER_GRAM = {
-    # From BO105 balance chart scaling (G vs H):
-    # 0.5 IPS ≈ 200 g in Ground, 0.5 IPS ≈ 500 g in Hover.
-    # => IPS per gram: 0.0025 (Ground), 0.0010 (Hover)
     "GROUND": 0.0025,
     "HOVER": 0.0010,
+    # En esta simulación, horizontal usa la misma sensibilidad que hover
     "HORIZ": 0.0010,
 }
 
-
+# Track base profiles (mm relative to YEL after normalization)
 RUN_BASE_TRACK = {
     1: {
         "GROUND": {"BLU": +6.0, "GRN": -3.0, "YEL": 0.0, "RED": -4.0},
@@ -55,10 +59,24 @@ RUN_BASE_TRACK = {
     },
 }
 
+# --- NUEVO: balance base más “realista” para que haya correcciones visibles ---
+# RUN 1 inspirado en ejemplos típicos (p.ej. ~0.45 IPS en ground)
 RUN_BASE_BAL = {
-    1: {"GROUND": (0.18, 125.0), "HOVER": (0.11, 110.0), "HORIZ": (0.09, 95.0)},
-    2: {"GROUND": (0.14, 140.0), "HOVER": (0.08, 120.0), "HORIZ": (0.07, 105.0)},
-    3: {"GROUND": (0.10, 160.0), "HOVER": (0.06, 135.0), "HORIZ": (0.05, 120.0)},
+    1: {
+        "GROUND": (0.45, 315.0),  # ~10:30
+        "HOVER": (0.25, 180.0),   # ~06:00
+        "HORIZ": (0.18, 150.0),
+    },
+    2: {
+        "GROUND": (0.28, 330.0),
+        "HOVER": (0.14, 210.0),
+        "HORIZ": (0.12, 190.0),
+    },
+    3: {
+        "GROUND": (0.18, 20.0),
+        "HOVER": (0.08, 350.0),
+        "HORIZ": (0.07, 320.0),
+    },
 }
 
 
@@ -89,6 +107,9 @@ def simulate_measurement(run: int, regime: str, adjustments: dict) -> Measuremen
     base_track = RUN_BASE_TRACK.get(run, RUN_BASE_TRACK[3])[regime].copy()
     base_amp, base_phase = RUN_BASE_BAL.get(run, RUN_BASE_BAL[3])[regime]
 
+    # -------------------------
+    # TRACK model
+    # -------------------------
     track = {}
     for b in BLADES:
         pitch_effect = PITCHLINK_MM_PER_TURN * float(adj["pitch_turns"][b])
@@ -107,15 +128,26 @@ def simulate_measurement(run: int, regime: str, adjustments: dict) -> Measuremen
         track[b] = float(track[b] - yel0)
     track["YEL"] = 0.0
 
-    # Simple 1/rev balance vector model
+    # -------------------------
+    # 1/rev BALANCE vector model
+    # -------------------------
     v = _vec_from_clock_deg(base_phase) * float(base_amp)
-    k = float(IPS_PER_GRAM.get(regime, IPS_PER_GRAM["GROUND"]))
+
+    ips_per_gram = float(IPS_PER_GRAM.get(regime, IPS_PER_GRAM["GROUND"]))
+
+    # Each blade bolt weight acts along that blade's axis and reduces the imbalance vector
     for b in BLADES:
         grams = float(adj["bolt_g"][b])
-        v += (-k * grams) * _vec_from_clock_deg(BLADE_CLOCK_DEG[b])
+        v += (-ips_per_gram * grams) * _vec_from_clock_deg(BLADE_CLOCK_DEG[b])
+
+    # Measurement noise (small, so solver effect is visible)
     v += np.array([random.gauss(0.0, 0.003), random.gauss(0.0, 0.003)], dtype=float)
 
     amp = float(np.linalg.norm(v))
     phase = float(_clock_deg_from_vec(v)) if amp > 1e-6 else 0.0
 
-    return Measurement(regime=regime, balance=BalanceReading(amp, phase, BO105_DISPLAY_RPM), track_mm=track)
+    return Measurement(
+        regime=regime,
+        balance=BalanceReading(amp, phase, BO105_DISPLAY_RPM),
+        track_mm=track,
+    )
