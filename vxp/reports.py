@@ -106,7 +106,7 @@ def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str
 
     pl = suggest_pitchlink(meas_by_regime)
     tt = suggest_trimtabs(meas_by_regime)
-    wrow = suggest_weight(meas_by_regime)
+    wrow = suggest_weight(meas_by_regime)  # grams per blade (max 2 blades)
 
     lines.append("")
     lines.append("Adjustments")
@@ -143,7 +143,7 @@ def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str
     lines.append(_hdr("TabS6(deg)"))
     lines.append(_row("", {b: tt[b] * 0.8 for b in BLADES}, "6.1f"))
 
-    # Weight (grams on blade bolts) — up to two blades in the chart-style solution
+    # Weight (grams, up to 2 blades)
     lines.append(_hdr("Wt(g)"))
     lines.append(_row("", wrow, "6.0f"))
 
@@ -210,8 +210,6 @@ def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement]) -> str
     pl = suggest_pitchlink(meas_by_regime)
     tt = suggest_trimtabs(meas_by_regime)
     wrow = suggest_weight(meas_by_regime)
-    wrow = {b: 0.0 for b in BLADES}
-    wrow[wb] = float(wg)
 
     def td(text: str, *, color: str | None = None, bold: bool = False, w: int = 86) -> str:
         style = [f"width:{w}px", "padding:2px 8px", "text-align:right", "white-space:pre"]
@@ -248,7 +246,7 @@ def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement]) -> str
         + row("P/L(flats)", pl, "6.2f")
         + row("TabS5(deg)", {b: tt[b] * 0.8 for b in BLADES}, "6.1f")
         + row("TabS6(deg)", {b: tt[b] * 0.8 for b in BLADES}, "6.1f")
-        + row("Wt(plqts)", wrow, "6.0f")
+        + row("Wt(g)", wrow, "6.0f")
         + "</table>"
     )
 
