@@ -11,7 +11,7 @@ from .sim import (
     default_adjustments,
     simulate_measurement,
 )
-from .reports import legacy_results_text, legacy_results_plain_text, legacy_results_html, clock_label
+from .reports import legacy_results_plain_text, legacy_results_html, clock_label
 from .plots import plot_measurements_panel, plot_track_marker, plot_track_graph, plot_polar, plot_polar_compare
 from .solver import all_ok, regime_status
 
@@ -80,6 +80,17 @@ def init_state() -> None:
     st.session_state.setdefault("vxp_view_run", 1)
 
     st.session_state.setdefault("vxp_adjustments", default_adjustments())
+
+    # Backward-compat: older builds used 'pitch_turns'. Convert to flats.
+    try:
+        for rr in REGIMES:
+            a = st.session_state.vxp_adjustments.get(rr, {})
+            if "pitch_turns" in a and "pitch_flats" not in a:
+                a["pitch_flats"] = {b: float(a["pitch_turns"].get(b, 0.0)) * 6.0 for b in BLADES}
+                del a["pitch_turns"]
+    except Exception:
+        pass
+
     st.session_state.setdefault("vxp_pending_regime", None)
     st.session_state.setdefault("vxp_acq_in_progress", False)
     st.session_state.setdefault("vxp_acq_done", False)
@@ -88,6 +99,7 @@ def init_state() -> None:
     st.session_state.setdefault(
         "vxp_aircraft",
         {
+            "registration": "",
             "weight": 0.0,
             "cg": 0.0,
             "hours": 0.0,
@@ -435,7 +447,7 @@ def _render_acquire_dialog(run: int, regime: str) -> None:
             time.sleep(duration_s / steps)
         progress_ph.empty()
 
-        meas = simulate_measurement(run, regime, st.session_state.vxp_adjustments)
+        meas = simulate_measurement(run, regime, st.session_state.vxp_adjustments, st.session_state.vxp_aircraft)
         current_run_data(run)[regime] = meas
         completed_set(run).add(regime)
 
@@ -570,7 +582,7 @@ def screen_acquire_window():
                 time.sleep(duration_s / steps)
             progress_ph.empty()
 
-            meas = simulate_measurement(run, regime, st.session_state.vxp_adjustments)
+            meas = simulate_measurement(run, regime, st.session_state.vxp_adjustments, st.session_state.vxp_aircraft)
             current_run_data(run)[regime] = meas
             completed_set(run).add(regime)
 
@@ -636,16 +648,11 @@ def screen_meas_list_window():
         st.write("No measurements for this run yet. Go to COLLECT.")
         right_close_button("Close", on_click=lambda: go("mr_menu"))
         return
-    # User request: show the report inside a NORMAL textbox (white inset area)
-    # like the early versions. We therefore strip HTML coloring and render as
-    # a disabled text_area, which is stable across Streamlit versions.
-    st.text_area(
-        "",
-        value=legacy_results_plain_text(view_run, data),
-        height=420,
-        key=f"meas_list_box_{view_run}",
-        disabled=True,
-        label_visibility="collapsed",
+
+    # Render as HTML so blade/regime colors are visible (like the legacy VXP).
+    st.markdown(
+        legacy_results_html(view_run, data, aircraft=st.session_state.vxp_aircraft),
+        unsafe_allow_html=True,
     )
     right_close_button("Close", on_click=lambda: go("mr_menu"))
 
@@ -756,7 +763,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] d
 
     with left:
         # Render as HTML so the Adjustments block can use a stable table layout.
-        st.markdown(legacy_results_html(view_run, data), unsafe_allow_html=True)
+        st.markdown(legacy_results_html(view_run, data, aircraft=st.session_state.vxp_aircraft), unsafe_allow_html=True)
 
     with right:
         st.pyplot(fig, clear_figure=True)
@@ -772,7 +779,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stSelectbox"] d
 
 def screen_settings_window():
     win_caption("SETTINGS", active=True)
-    # User requested: only the Run selector (no flight/regime selector).
+    # Only the Run selector (no flight/regime selector).
     run_selector_inline(key="run_selector_settings")
 
     # We keep adjustments internally per-regime, but the SETTINGS editor applies
@@ -782,19 +789,19 @@ def screen_settings_window():
 
     hdr = st.columns([0.20, 0.27, 0.27, 0.26])
     hdr[0].markdown("**Blade**")
-    hdr[1].markdown("**Pitch link (turns)**")
+    hdr[1].markdown("**Pitch link (flats)**")
     hdr[2].markdown("**Trim tab (mm)**")
     hdr[3].markdown("**Bolt weight (g)**")
 
     for b in BLADES:
         row = st.columns([0.20, 0.27, 0.27, 0.26])
         row[0].markdown(b)
-        pl_v = float(row[1].number_input("", value=float(adj["pitch_turns"][b]), step=0.25, key=f"pl_all_{b}"))
-        tt_v = float(row[2].number_input("", value=float(adj["trim_mm"][b]), step=0.5, key=f"tt_all_{b}"))
-        wt_v = float(row[3].number_input("", value=float(adj["bolt_g"][b]), step=5.0, key=f"wt_all_{b}"))
+        pl_v = float(row[1].number_input("", value=float(adj["pitch_flats"][b]), step=0.25, key=f"pl_all_{b}"))
+        tt_v = float(row[2].number_input("", value=float(adj["trim_mm"][b]), step=0.25, key=f"tt_all_{b}"))
+        wt_v = float(row[3].number_input("", value=float(adj["bolt_g"][b]), step=10.0, key=f"wt_all_{b}"))
 
         for rr in REGIMES:
-            st.session_state.vxp_adjustments[rr]["pitch_turns"][b] = pl_v
+            st.session_state.vxp_adjustments[rr]["pitch_flats"][b] = pl_v
             st.session_state.vxp_adjustments[rr]["trim_mm"][b] = tt_v
             st.session_state.vxp_adjustments[rr]["bolt_g"][b] = wt_v
 
@@ -827,15 +834,10 @@ def screen_solution_text_window():
         st.write("No measurements for this run yet. Go to COLLECT.")
         right_close_button("Close", on_click=lambda: go("mr_menu"))
         return
-    # User request: SOLUTION should be a normal report textbox (no broken
-    # inline coloring). We render plain text in a disabled text_area.
-    st.text_area(
-        "",
-        value=legacy_results_plain_text(view_run, data),
-        height=380,
-        key=f"solution_box_{view_run}",
-        disabled=True,
-        label_visibility="collapsed",
+
+    st.markdown(
+        legacy_results_html(view_run, data, aircraft=st.session_state.vxp_aircraft),
+        unsafe_allow_html=True,
     )
     right_close_button("Close", on_click=lambda: go("mr_menu"))
 
@@ -909,6 +911,8 @@ def screen_aircraft_info_window():
     lab, inp, _pad = st.columns([0.30, 0.36, 0.34], gap="large")
     with lab:
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        st.markdown("REGISTRATION:")
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
         st.markdown("WEIGHT:")
         st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
         st.markdown("C.G. :")
@@ -918,6 +922,14 @@ def screen_aircraft_info_window():
         st.markdown("INITIALS:")
 
     with inp:
+        info["registration"] = str(
+            st.text_input(
+                "",
+                value=str(info.get("registration", "")),
+                key="air_reg",
+                label_visibility="collapsed",
+            )
+        )
         info["weight"] = float(
             st.number_input(
                 "",

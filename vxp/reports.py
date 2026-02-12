@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import re
 
 from .types import Measurement
-from .solver import suggest_pitchlink, suggest_trimtabs, suggest_weight
+from .solver import suggest_pitchlink, suggest_trimtabs, suggest_weight, track_split_mm
 
 BLADES = ["BLU", "GRN", "YEL", "RED"]
 
@@ -23,13 +23,6 @@ REGIME_COLOR = {
     "HORIZ": "#008800",
 }
 
-
-def _c(txt: str, color: str) -> str:
-    """Wrap text in a color span. Safe for use inside vxp-mono (white-space:pre)."""
-
-    return f"<span style='color:{color};'>{txt}</span>"
-
-
 # Display order (BO105 procedure): ONLY these three.
 DISPLAY_POINTS: List[Tuple[str, str]] = [
     ("100% Ground", "GROUND"),
@@ -40,25 +33,27 @@ DISPLAY_POINTS: List[Tuple[str, str]] = [
 
 def clock_label(theta_deg: float) -> str:
     """Convert phase degrees to a 12-hour clock label (legacy VXP style)."""
-
+    # 0° = 12:00, 90° = 03:00, 180° = 06:00 ...
     hour = int(round(theta_deg / 30.0)) % 12
     hour = 12 if hour == 0 else hour
     minute = 0 if abs((theta_deg / 30.0) - round(theta_deg / 30.0)) < 0.25 else 30
     return f"{hour:02d}:{minute:02d}"
 
 
-def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str:
-    """Legacy-like mono report used on MEASUREMENTS GRAPH / LIST.
+def _c(txt: str, color: str) -> str:
+    return f"<span style='color:{color};'>{txt}</span>"
 
-    - BO105 only (Ground / Hover / Horizontal)
-    - Adds blade & regime color cues
-    - Aligns Adjustments so values appear directly under each blade
-    """
+
+def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement], *, aircraft: Optional[dict] = None) -> str:
+    """Legacy-like mono report (with inline color spans)."""
+    ac_id = None
+    if aircraft:
+        ac_id = str(aircraft.get("registration") or aircraft.get("reg") or "").strip() or None
 
     lines: List[str] = []
     lines.append("BO105   MAIN ROTOR   TRACK & BALANCE")
     lines.append("OPTION: B   STROBEX MODE: B")
-    lines.append(f"RUN: {run}   ID: TRAINING")
+    lines.append(f"RUN: {run}   ID: {ac_id or 'TRAINING'}")
     lines.append("")
 
     # -------------------------
@@ -89,7 +84,7 @@ def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str
         lines.append(f"{reg}  " + "  ".join(parts))
 
     # -------------------------
-    # Solution / Prediction
+    # Solution
     # -------------------------
     lines.append("")
     lines.append("----- Solution Options -----")
@@ -105,14 +100,13 @@ def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str
     lines.append("USED: Pitch link, Trim tab, Weight")
 
     pl = suggest_pitchlink(meas_by_regime)
-    tt = suggest_trimtabs(meas_by_regime)
-    wrow = suggest_weight(meas_by_regime)  # grams per blade (max 2 blades)
+    tab = suggest_trimtabs(meas_by_regime)
+    wrow = suggest_weight(meas_by_regime)
 
     lines.append("")
     lines.append("Adjustments")
 
-    # Header aligned like the original (values appear directly under each blade).
-    # We use fixed-width columns so the result is stable even with inline <span> coloring.
+    # Fixed-width columns so the result remains stable inside pre text.
     COL_W = 8
 
     def _hblade(b: str) -> str:
@@ -133,71 +127,44 @@ def legacy_results_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str
             + _vblade("RED", format(vals["RED"], fmt))
         )
 
-    # P/L
     lines.append(_hdr("P/L(flats)"))
     lines.append(_row("", pl, "6.2f"))
 
-    # Keep the same names as the legacy screen (TabS5/TabS6)
-    lines.append(_hdr("TabS5(deg)"))
-    lines.append(_row("", {b: tt[b] * 0.8 for b in BLADES}, "6.1f"))
-    lines.append(_hdr("TabS6(deg)"))
-    lines.append(_row("", {b: tt[b] * 0.8 for b in BLADES}, "6.1f"))
+    lines.append(_hdr("Tab(mm)"))
+    lines.append(_row("", tab, "6.2f"))
 
-    # Weight (grams, up to 2 blades)
     lines.append(_hdr("Wt(g)"))
     lines.append(_row("", wrow, "6.0f"))
 
     lines.append("")
-    lines.append("----- Prediction -----")
+    lines.append("----- Track Split (mm) -----")
     for name, src in DISPLAY_POINTS:
         if src not in meas_by_regime:
             continue
         m = meas_by_regime[src]
         reg = _c(f"{name:<18}", REGIME_COLOR.get(src, "#000"))
-        lines.append(f"{reg}  M/R L   {m.balance.amp_ips:0.2f}")
-
-    lines.append("Track Split")
-    for name, src in DISPLAY_POINTS:
-        if src not in meas_by_regime:
-            continue
-        m = meas_by_regime[src]
-        vals = [m.track_mm[b] for b in BLADES]
-        split = max(vals) - min(vals)
-        reg = _c(f"{name:<18}", REGIME_COLOR.get(src, "#000"))
-        lines.append(f"{reg}  {split:0.2f}")
+        lines.append(f"{reg}  {track_split_mm(m):0.1f}")
 
     lines.append("")
     return "\n".join(lines)
 
 
-def legacy_results_plain_text(run: int, meas_by_regime: Dict[str, Measurement]) -> str:
-    """Same report as legacy_results_text but without HTML tags.
-
-    Useful for rendering inside Streamlit widgets like st.text_area where we
-    want a 'normal' textbox and reliable monospace alignment.
-    """
-
-    txt = legacy_results_text(run, meas_by_regime)
-    # Remove the inline <span ...> color wrappers.
+def legacy_results_plain_text(run: int, meas_by_regime: Dict[str, Measurement], *, aircraft: Optional[dict] = None) -> str:
+    """Same report as legacy_results_text but without HTML tags."""
+    txt = legacy_results_text(run, meas_by_regime, aircraft=aircraft)
     return re.sub(r"</?span[^>]*>", "", txt)
 
 
-def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement]) -> str:
+def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement], *, aircraft: Optional[dict] = None) -> str:
     """HTML report used in the UI.
 
-    Streamlit + HTML can sometimes collapse whitespace when inline spans are
-    present. For the *Adjustments* block we therefore render a real HTML table
-    with fixed column widths (so BLU/GRN/YEL/RED always line up).
+    We keep one single scrollable pane (like the legacy VXP textbox) but render
+    *Adjustments* as a real HTML table so columns line up even with colors.
     """
+    txt = legacy_results_text(run, meas_by_regime, aircraft=aircraft)
 
-    # Build the classic mono text (with colored regime labels). We'll reuse it
-    # for everything except the Adjustments block.
-    txt = legacy_results_text(run, meas_by_regime)
-
-    # Split the report around the first "Adjustments" marker.
     marker = "\nAdjustments\n"
     if marker not in txt:
-        # Fallback: just render as-is.
         return (
             "<div class='vxp-mono' style='white-space:pre; height:560px; overflow:auto;'>"
             + txt
@@ -206,13 +173,13 @@ def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement]) -> str
 
     before, after = txt.split(marker, 1)
 
-    # Recompute adjustments to render as a stable table.
+    # Recompute adjustments for a real table
     pl = suggest_pitchlink(meas_by_regime)
-    tt = suggest_trimtabs(meas_by_regime)
+    tab = suggest_trimtabs(meas_by_regime)
     wrow = suggest_weight(meas_by_regime)
 
-    def td(text: str, *, color: str | None = None, bold: bool = False, w: int = 86) -> str:
-        style = [f"width:{w}px", "padding:2px 8px", "text-align:right", "white-space:pre"]
+    def td(text: str, *, color: str | None = None, bold: bool = False, align: str = "right") -> str:
+        style = ["padding:2px 10px", f"text-align:{align}", "white-space:pre"]
         if color:
             style.append(f"color:{color}")
         if bold:
@@ -225,40 +192,39 @@ def legacy_results_html(run: int, meas_by_regime: Dict[str, Measurement]) -> str
     def row(label: str, vals: Dict[str, float], fmt: str) -> str:
         return (
             "<tr>"
-            + f"<td style='width:140px; padding:2px 8px; text-align:left; white-space:pre; font-weight:700'>{label}</td>"
-            + td(format(vals['BLU'], fmt), color=BLADE_COLOR['BLU'])
-            + td(format(vals['GRN'], fmt), color=BLADE_COLOR['GRN'])
-            + td(format(vals['YEL'], fmt), color=BLADE_COLOR['YEL'])
-            + td(format(vals['RED'], fmt), color=BLADE_COLOR['RED'])
+            + td(label, bold=True, align="left")
+            + td(format(vals["BLU"], fmt), color=BLADE_COLOR["BLU"])
+            + td(format(vals["GRN"], fmt), color=BLADE_COLOR["GRN"])
+            + td(format(vals["YEL"], fmt), color=BLADE_COLOR["YEL"])
+            + td(format(vals["RED"], fmt), color=BLADE_COLOR["RED"])
             + "</tr>"
         )
 
     table = (
-        "<div style='margin-top:6px; margin-bottom:6px; font-weight:700;'>Adjustments</div>"
-        "<table style='border-collapse:collapse; font-family:Courier New,Consolas,monospace; font-size:14px;'>"
+        "<table style='border-collapse:collapse; width:100%; font-family:Consolas, monospace; font-size:13px;'>"
         "<tr>"
-        "<td style='width:140px; padding:2px 8px; text-align:left; white-space:pre; font-weight:700'></td>"
+        + td("Adjustments", bold=True, align="left")
         + th("BLU", BLADE_COLOR["BLU"])
         + th("GRN", BLADE_COLOR["GRN"])
         + th("YEL", BLADE_COLOR["YEL"])
         + th("RED", BLADE_COLOR["RED"])
         + "</tr>"
         + row("P/L(flats)", pl, "6.2f")
-        + row("TabS5(deg)", {b: tt[b] * 0.8 for b in BLADES}, "6.1f")
-        + row("TabS6(deg)", {b: tt[b] * 0.8 for b in BLADES}, "6.1f")
+        + row("Tab(mm)", tab, "6.2f")
         + row("Wt(g)", wrow, "6.0f")
         + "</table>"
     )
 
-    # Remove the old adjustments lines from `after` (up to the Prediction header).
-    if "\n----- Prediction -----\n" in after:
-        _old_adj, rest = after.split("\n----- Prediction -----\n", 1)
-        after = "----- Prediction -----\n" + rest
-
     return (
-        "<div class='vxp-mono' style='white-space:normal; height:560px; overflow:auto;'>"
-        + f"<div style='white-space:pre'>{before}</div>"
+        "<div class='vxp-mono' style='height:560px; overflow:auto;'>"
+        "<div style='white-space:pre;'>"
+        + before
+        + "\n</div>"
+        "<div style='padding:6px 8px; background:white; border:1px solid #808080; margin:6px 0;'>"
         + table
-        + f"<div style='white-space:pre; margin-top:8px'>{after}</div>"
         + "</div>"
+        "<div style='white-space:pre;'>"
+        + after
+        + "</div>"
+        "</div>"
     )
