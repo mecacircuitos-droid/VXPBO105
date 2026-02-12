@@ -14,7 +14,7 @@ def _b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
-_ASSET_BG = Path(__file__).parent / "assets" / "backgrounds" / "rugged_tablet.png"
+_ASSET_BG = Path(__file__).parent / "assets" / "backgrounds" / "cockpit.jpg"
 BG_B64 = _b64(_ASSET_BG) if _ASSET_BG.exists() else ""
 
 
